@@ -1104,6 +1104,8 @@ class NextGenUdaanApp {
                 <td>${lead.name || 'N/A'}</td>
                 <td>${lead.phone || 'N/A'}</td>
                 <td>${lead.email || 'N/A'}</td>
+                <td>${lead.instagramId || lead.instagram || 'N/A'}</td>
+                <td>${lead.leadSource || 'N/A'}</td>
                 <td>${lead.location || 'N/A'}</td>
                 <td>${this.formatDate(lead.timestamp?.toDate ? lead.timestamp.toDate() : lead.timestamp)}</td>
                 <td>
@@ -1364,13 +1366,13 @@ class NextGenUdaanApp {
         if (!source) return 'Other';
         const s = source.toLowerCase();
 
-        if (s.includes('instagram') || s.includes('social')) return 'Instagram';
+        if (s.includes('instagram')) return 'Instagram';
         if (s.includes('whatsapp')) return 'WhatsApp';
         if (s.includes('referral')) return 'Referral';
         if (s.includes('event')) return 'Event';
-        if (s.includes('website')) return 'Other';
 
-        return 'Other';
+        // If it's a known source but with extra info (e.g. "Others: Friend"), return the whole string if it doesn't match above but is specific
+        return source.charAt(0).toUpperCase() + source.slice(1);
     }
 
     formatDate(dateString) {
