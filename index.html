@@ -4,10 +4,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NextGen Udaan CRM</title>
+    <title>Nextgen Udaan - CRM</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="icon" type="image/png" href="crm.png">
+    <link rel="icon" type="image/png" href="nextlogo.png">
     <link href="https://unpkg.com/feather-icons/dist/feather.css" rel="stylesheet">
 </head>
 
@@ -135,6 +135,7 @@
         <!-- Sidebar -->
         <aside id="sidebar" class="sidebar">
             <div class="sidebar-logo">
+                <img src="nextlogo.png" alt="NextGen Udaan Logo" style="width: 40px; height: 40px; margin-right: 12px;">
                 <h3>NextGen Udaan</h3>
             </div>
             <nav class="sidebar-nav">
@@ -165,6 +166,10 @@
                 <a href="#" class="nav-item" data-page="whatsapp">
                     <i data-feather="message-circle"></i>
                     <span>WhatsApp</span>
+                </a>
+                <a href="#" class="nav-item" data-page="teams">
+                    <i data-feather="users"></i>
+                    <span>Teams</span>
                 </a>
             </nav>
         </aside>
@@ -685,6 +690,26 @@
             </div>
 
 
+            <!-- Teams Page -->
+            <div id="teams-page" class="page">
+                <div class="page-header">
+                    <div class="header-left">
+                        <h2>Team Management</h2>
+                        <p>Organize your downline into productive squads</p>
+                    </div>
+                    <div class="header-right">
+                        <button id="create-team-btn" class="btn btn--primary">
+                            <i data-feather="plus"></i>
+                            Create Team
+                        </button>
+                    </div>
+                </div>
+
+                <div id="teams-grid" class="teams-grid">
+                    <!-- Teams will be populated by JS -->
+                </div>
+            </div>
+
             <!-- Lead Management Page -->
             <div id="lead-management-page" class="page">
                 <div class="page-header">
@@ -1007,8 +1032,42 @@
         firebase.initializeApp(firebaseConfig);
     </script>
 
+    <!-- Team Modal -->
+    <div id="team-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="team-modal-title">Create New Team</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="team-form" class="premium-form">
+                    <input type="hidden" id="team-id">
+                    <div class="form-group">
+                        <label class="form-label">Team Name *</label>
+                        <input type="text" id="team-name" class="form-control" placeholder="e.g., Alpha Squad" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Team Leader *</label>
+                        <select id="team-leader" class="form-control" required>
+                            <option value="">Select Leader</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Members (Hold Ctrl to select multiple)</label>
+                        <select id="team-members" class="form-control" multiple style="height: 150px;">
+                            <!-- Employees populated by JS -->
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="submit" class="btn btn--primary">Save Team</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/feather-icons"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=3"></script>
 </body>
 
 </html>

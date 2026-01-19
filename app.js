@@ -10,6 +10,7 @@ class NextGenUdaanApp {
             leaderboard: [],
             leads: [],
             employees: [],
+            teams: [],
             whatsappTemplates: [] // WhatsApp Message Templates
         };
 
@@ -179,22 +180,90 @@ class NextGenUdaanApp {
     }
 
     checkAuthentication() {
-        firebase.auth().onAuthStateChanged((user) => {
+        firebase.auth().onAuthStateChanged(async (user) => {
             if (user) {
-                this.currentUser = {
-                    id: user.uid,
-                    name: user.displayName || user.email.split('@')[0],
-                    email: user.email,
-                    role: 'member',
-                    status: 'active'
-                };
-                this.setupRealtimeData();
-                this.showApp();
+                try {
+                    // Check permissions before showing app
+                    const authData = await this.checkUserPermissions(user.email);
+
+                    this.currentUser = {
+                        id: user.uid,
+                        name: user.displayName || user.email.split('@')[0],
+                        email: user.email,
+                        employeeId: authData.employeeId,
+                        role: authData.role || 'member',
+                        status: 'active',
+                        permissions: authData.permissions
+                    };
+                    this.setupRealtimeData();
+                    this.showApp();
+                } catch (error) {
+                    console.error('Access denied:', error);
+                    await firebase.auth().signOut();
+                    this.currentUser = null;
+                    this.showLogin();
+                    this.showError(error.message || "Access Denied: You do not have permission to access CRM.");
+                }
             } else {
                 this.currentUser = null;
                 this.showLogin();
             }
         });
+    }
+
+    async checkUserPermissions(email) {
+        // 1. Get Employee
+        const empSnapshot = await this.db.collection('employees').where('email', '==', email).limit(1).get();
+        if (empSnapshot.empty) {
+            throw new Error("Employee record not found in HRMS.");
+        }
+
+        const empId = empSnapshot.docs[0].id;
+
+        // 2. Get Access
+        const accessSnapshot = await this.db.collection('userAccess').where('employeeId', '==', empId).get();
+        
+        if (accessSnapshot.empty) {
+            throw new Error("Access profile not found.");
+        }
+
+        // Find the "best" record
+        // Security: If ANY record has hasCRMAccess: false, we respect it.
+        let finalAccessData = null;
+        for (const doc of accessSnapshot.docs) {
+            const data = doc.data();
+            
+            if (data.hasCRMAccess === false || data.hasCRMAccess === "false") {
+                throw new Error("CRM Access is disabled for your account.");
+            }
+
+            if (data.hasCRMAccess === true || data.hasCRMAccess === "true") {
+                if (!finalAccessData) finalAccessData = { ...data, id: doc.id };
+            }
+        }
+
+        if (!finalAccessData) {
+            throw new Error("CRM Access is disabled for your account.");
+        }
+
+        // 3. Get Role
+        const roleSnapshot = await this.db.collection('accessRoles').where('name', '==', finalAccessData.role).limit(1).get();
+
+        if (roleSnapshot.empty) {
+            return {
+                employeeId: empId,
+                role: finalAccessData.role,
+                permissions: { crm: {} }
+            };
+        }
+
+        const roleData = roleSnapshot.docs[0].data();
+
+        return {
+            employeeId: empId,
+            role: finalAccessData.role,
+            permissions: roleData.permissions || { crm: {} }
+        };
     }
 
     setupRealtimeData() {
@@ -234,6 +303,81 @@ class NextGenUdaanApp {
                 this.renderLeadsTable();
             }
         });
+
+        // Listen for Teams
+        this.db.collection('teams').onSnapshot(snapshot => {
+            this.data.teams = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            if (this.currentPage === 'teams') {
+                this.renderTeams();
+            }
+        });
+
+        // Listen for Permission/Role Changes (Realtime Access Control)
+        if (this.currentUser && this.currentUser.employeeId) {
+            // 1. Listen for User Access changes (CRM Access toggle, individual Role changes)
+            this.db.collection('userAccess').where('employeeId', '==', this.currentUser.employeeId)
+                .onSnapshot(async (snapshot) => {
+                    if (!snapshot.empty) {
+                        let finalAccessData = null;
+                        let accessRevoked = false;
+
+                        for (const doc of snapshot.docs) {
+                            const data = doc.data();
+                            if (data.hasCRMAccess === false || data.hasCRMAccess === undefined) {
+                                accessRevoked = true;
+                                break;
+                            }
+                            if (data.hasCRMAccess === true || data.hasCRMAccess === "true") {
+                                if (!finalAccessData) finalAccessData = data;
+                            }
+                        }
+                        
+                        // Critical: Immediate Logout if CRM Access is disabled in ANY record
+                        if (accessRevoked || !finalAccessData) {
+                            await firebase.auth().signOut();
+                            this.currentUser = null;
+                            this.showLogin();
+                            this.showError("Your CRM Access has been disabled by an administrator.");
+                            return;
+                        }
+
+                        // Handle Role change
+                        if (finalAccessData.role && finalAccessData.role !== this.currentUser.role) {
+                            this.currentUser.role = finalAccessData.role;
+                            // Fetch new role permissions
+                            const roleSnapshot = await this.db.collection('accessRoles').where('name', '==', finalAccessData.role).limit(1).get();
+                            if (!roleSnapshot.empty) {
+                                const roleData = roleSnapshot.docs[0].data();
+                                this.currentUser.permissions = roleData.permissions || { crm: {} };
+                                this.setupRoleBasedAccess();
+                                this.showPage(this.currentPage);
+                            }
+                        }
+                    } else {
+                        await firebase.auth().signOut();
+                        this.currentUser = null;
+                        this.showLogin();
+                        this.showError("Access profile not found.");
+                    }
+                });
+
+            // 2. Listen for Role Global changes (Changes to permissions of the current role)
+            this.db.collection('accessRoles').where('name', '==', this.currentUser.role)
+                .onSnapshot(snapshot => {
+                    if (!snapshot.empty) {
+                        const roleData = snapshot.docs[0].data();
+                        
+                        // Update permissions
+                        this.currentUser.permissions = roleData.permissions || { crm: {} };
+                        
+                        // Re-evaluate UI
+                        this.setupRoleBasedAccess();
+                        
+                        // Re-render current page to apply permissions instantly
+                        this.showPage(this.currentPage);
+                    }
+                });
+        }
     }
 
     handleLogin(e) {
@@ -376,11 +520,155 @@ class NextGenUdaanApp {
         }
     }
 
+    // Helper to get permissions for a specific module
+    getModulePermissions(moduleId) {
+        if (!this.currentUser || !this.currentUser.permissions || !this.currentUser.permissions.crm) {
+            return { view: false, add: false, edit: false, delete: false };
+        }
+        const perms = this.currentUser.permissions.crm[moduleId] || {};
+        return {
+            view: perms.view === true,
+            add: perms.add === true,
+            edit: perms.edit === true,
+            delete: perms.delete === true
+        };
+    }
+
+    renderAccessDenied(containerId, hasAccess = false) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        let deniedEl = container.querySelector('.access-denied-wrapper');
+
+        if (!hasAccess) {
+            // Hide all original children
+            Array.from(container.children).forEach(child => {
+                if (!child.classList.contains('access-denied-wrapper')) {
+                    child.style.display = 'none';
+                }
+            });
+
+            if (!deniedEl) {
+                deniedEl = document.createElement('div');
+                deniedEl.className = 'access-denied-wrapper';
+                deniedEl.innerHTML = `
+                    <i data-feather="lock" class="access-denied-icon"></i>
+                    <h2 class="access-denied-title">Access Denied</h2>
+                    <p class="access-denied-message">You don't have access to access this page, please contact administrator</p>
+                    <button class="btn btn--secondary" onclick="app.showPage('dashboard')">
+                        <i data-feather="home"></i> Back to Dashboard
+                    </button>
+                `;
+                container.appendChild(deniedEl);
+                this.initializeFeatherIcons();
+            } else {
+                deniedEl.style.display = 'flex';
+            }
+        } else {
+            // Restore original children visibility
+            Array.from(container.children).forEach(child => {
+                if (!child.classList.contains('access-denied-wrapper')) {
+                    child.style.display = '';
+                }
+            });
+            if (deniedEl) {
+                deniedEl.style.display = 'none';
+            }
+        }
+    }
+
     setupRoleBasedAccess() {
-        // Role-based access logic removed
+        // Helper to toggle Nav Item visibility
+        const toggleNav = (page, allowed) => {
+            const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+            if (nav) {
+                nav.style.display = (allowed !== false) ? 'flex' : 'none';
+            }
+            // Redirect if currently on restricted page
+            if (this.currentPage === page && allowed === false) {
+                this.showPage('dashboard');
+            }
+        };
+
+        if (!this.currentUser?.permissions?.crm) {
+            // If they have no CRM permissions at all, only show Dashboard as fallback
+            toggleNav('dashboard', true);
+            ['prospects', 'add-prospect', 'lead-management', 'whatsapp', 'analytics', 'data-management'].forEach(p => toggleNav(p, false));
+            return;
+        }
+        const perms = this.currentUser.permissions.crm;
+
+        // Helper to determine if a menu should be visible based on any permission
+        const shouldShow = (mPerms) => {
+            if (!mPerms) return false; 
+            return mPerms.view === true || mPerms.add === true || mPerms.edit === true || mPerms.delete === true;
+        };
+
+        // Dashboard - always visible if user has CRM access (handled at login level)
+        // but respect crm_dashboard permission if explicitly set
+        const dashboardAllowed = perms.crm_dashboard ? shouldShow(perms.crm_dashboard) : true;
+        toggleNav('dashboard', dashboardAllowed);
+
+        toggleNav('prospects', shouldShow(perms.prospect_management));
+        toggleNav('add-prospect', perms.prospect_management?.add === true);
+        toggleNav('lead-management', shouldShow(perms.lead_management));
+        toggleNav('whatsapp', shouldShow(perms.whatsapp_templates));
+        toggleNav('analytics', shouldShow(perms.analytics));
+        toggleNav('data-management', shouldShow(perms.data_management));
+        toggleNav('teams', shouldShow(perms.team_management));
+
+        // Enforce Add Button Visibility (if buttons exist outside nav)
+        const toggleButton = (id, allowed) => {
+            const btn = document.getElementById(id);
+            if (btn) btn.style.display = (allowed !== false) ? 'inline-block' : 'none';
+        };
+
+        // WhatsApp Create Button
+        toggleButton('create-template-btn', perms.whatsapp_templates?.add === true);
+
+        // Data Management Buttons
+        const dataPerms = this.getModulePermissions('data_management');
+        toggleButton('import-btn', dataPerms.add);         // Add can Import
+        toggleButton('create-backup', dataPerms.view);     // View can Export/Backup
+        toggleButton('restore-backup', dataPerms.edit);    // Edit can Restore
+        toggleButton('clear-all-data', dataPerms.delete);  // Delete can Clear
+
+        // Hide "Add" buttons inside pages logic
+        // This runs once on setup, but pages render dynamically.
+        // We will also check permissions inside render functions.
+
+        // If dashboard is hidden, redirect to first available page
+        if (!dashboardAllowed) {
+            const availablePages = ['prospects', 'add-prospect', 'lead-management', 'whatsapp', 'analytics', 'data-management', 'teams'];
+            for (const page of availablePages) {
+                const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+                if (nav && nav.style.display !== 'none') {
+                    this.showPage(page);
+                    break;
+                }
+            }
+        }
     }
 
     showPage(pageName) {
+        // Permission Check
+        const moduleIdMap = {
+            'dashboard': 'crm_dashboard',
+            'prospects': 'prospect_management',
+            'add-prospect': 'prospect_management', // Add shares prospect_management
+            'analytics': 'analytics',
+            'data-management': 'data_management',
+            'lead-management': 'lead_management',
+            'whatsapp': 'whatsapp_templates',
+            'teams': 'team_management'
+        };
+
+        const moduleId = moduleIdMap[pageName];
+        const perms = this.getModulePermissions(moduleId);
+        
+        // Dashboard is a special case, but we check crm_dashboard view specifically if it exists
+        const canView = (pageName === 'dashboard' && !moduleId) ? true : perms.view;
+
         // Update navigation
         document.querySelectorAll('.nav-item').forEach(item => {
             item.classList.remove('active');
@@ -403,10 +691,20 @@ class NextGenUdaanApp {
         const targetPage = document.getElementById(`${pageName}-page`);
         if (targetPage) {
             targetPage.classList.add('active');
+            
+            if (!canView && pageName !== 'dashboard') {
+                this.renderAccessDenied(`${pageName}-page`, false);
+            } else if (pageName === 'dashboard' && !perms.view && moduleId) {
+                 this.renderAccessDenied('dashboard-page', false);
+            } else {
+                // Ensure access denied is cleared if it exists
+                this.renderAccessDenied(`${pageName}-page`, true);
+                
+                // Load page-specific content
+                this.loadPageContent(pageName);
+            }
         }
 
-        // Load page-specific content
-        this.loadPageContent(pageName);
         this.currentPage = pageName;
 
         // Update feather icons
@@ -423,7 +721,8 @@ class NextGenUdaanApp {
             'analytics': 'Analytics',
             'data-management': 'Data Management',
             'lead-management': 'Lead Management',
-            'whatsapp': 'WhatsApp Messaging'
+            'whatsapp': 'WhatsApp Messaging',
+            'teams': 'Team Management'
         };
         return titles[pageName] || 'Dashboard';
     }
@@ -451,6 +750,9 @@ class NextGenUdaanApp {
                     break;
                 case 'whatsapp':
                     this.loadWhatsAppPage();
+                    break;
+                case 'teams':
+                    this.loadTeams();
                     break;
             }
         } catch (error) {
@@ -753,6 +1055,11 @@ class NextGenUdaanApp {
                 .map(s => `<option value="${s}" ${prospect.status === s ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`)
                 .join('');
 
+            // detailed permissions
+            const prospectPerms = this.getModulePermissions('prospect_management');
+            const canEdit = prospectPerms.edit;
+            const canDelete = prospectPerms.delete;
+
             row.innerHTML = `
                 <td>${prospect.name}</td>
                 <td>${prospect.phone}</td>
@@ -760,7 +1067,8 @@ class NextGenUdaanApp {
                 <td>
                     <select class="status-select status--${this.getStatusClass(prospect.status)}" 
                             onchange="app.updateProspectStatus('${prospect.id}', this.value)"
-                            style="width: 100%; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                            style="width: 100%; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);"
+                            ${!canEdit ? 'disabled' : ''}>
                         ${statusOptions}
                     </select>
                 </td>
@@ -772,12 +1080,14 @@ class NextGenUdaanApp {
                         <button class="btn-icon" onclick="app.viewProspect('${prospect.id}')" title="View">
                             <i data-feather="eye"></i>
                         </button>
+                        ${canEdit ? `
                         <button class="btn-icon" onclick="app.editProspect('${prospect.id}')" title="Edit">
                             <i data-feather="edit"></i>
-                        </button>
+                        </button>` : ''}
+                        ${canDelete ? `
                         <button class="btn-icon" onclick="app.deleteProspect('${prospect.id}')" title="Delete">
                             <i data-feather="trash-2"></i>
-                        </button>
+                        </button>` : ''}
                     </div>
                 </td>
             `;
@@ -1076,12 +1386,20 @@ class NextGenUdaanApp {
         this.setupLeadManagementListeners();
     }
 
+
+
     renderLeadsTable(leadsToRender = null) {
         const tbody = document.getElementById('leads-tbody');
         if (!tbody) return;
 
         const leads = leadsToRender || this.data.leads;
         tbody.innerHTML = '';
+        
+        // detailed permissions for Leads
+        const leadPerms = this.getModulePermissions('lead_management');
+        const canEdit = leadPerms.edit;
+        const canDelete = leadPerms.delete;
+
         if (!leads || leads.length === 0) {
             tbody.innerHTML = `
                 <tr>
@@ -1100,7 +1418,7 @@ class NextGenUdaanApp {
         leads.forEach(lead => {
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td><input type="checkbox" class="lead-checkbox" data-id="${lead.id}"></td>
+                <td><input type="checkbox" class="lead-checkbox" data-id="${lead.id}" ${!canDelete ? 'disabled' : ''}></td>
                 <td>${lead.name || 'N/A'}</td>
                 <td>${lead.phone || 'N/A'}</td>
                 <td>${lead.email || 'N/A'}</td>
@@ -1110,12 +1428,14 @@ class NextGenUdaanApp {
                 <td>${this.formatDate(lead.timestamp?.toDate ? lead.timestamp.toDate() : lead.timestamp)}</td>
                 <td>
                     <div class="table-actions">
+                        ${canEdit ? `
                         <button class="btn btn--icon btn--success btn--sm transfer-lead" data-id="${lead.id}" title="Transfer to Prospect">
                             <i data-feather="user-plus"></i>
-                        </button>
+                        </button>` : ''}
+                        ${canDelete ? `
                         <button class="btn btn--icon btn--error btn--sm delete-lead" data-id="${lead.id}" title="Delete Lead">
                             <i data-feather="trash-2"></i>
-                        </button>
+                        </button>` : ''}
                     </div>
                 </td>
             `;
@@ -1173,6 +1493,12 @@ class NextGenUdaanApp {
         const exportBtn = document.getElementById('export-leads-btn');
         if (exportBtn) {
             exportBtn.onclick = () => this.exportLeads();
+        }
+        
+        // Disable bulk delete button if no delete permission
+        const leadPerms = this.getModulePermissions('lead_management');
+        if (deleteSelectedBtn && !leadPerms.delete) {
+            deleteSelectedBtn.style.display = 'none';
         }
     }
 
@@ -1843,6 +2169,13 @@ class NextGenUdaanApp {
     }
 
     importData() {
+        // Permission check
+        const perms = this.getModulePermissions('data_management');
+        if (!perms.add) {
+            this.showError('Permission Denied: You do not have permission to import data.');
+            return;
+        }
+
         const fileInput = document.getElementById('import-file');
         if (!fileInput || fileInput.files.length === 0) {
             this.showError('Please select a CSV file to import');
@@ -1971,6 +2304,13 @@ class NextGenUdaanApp {
 
     createBackup() {
         try {
+            // Permission check (View allows export/backup)
+            const perms = this.getModulePermissions('data_management');
+            if (!perms.view) {
+                this.showError('Permission Denied: You do not have access to data management.');
+                return;
+            }
+
             const backup = {
                 version: '1.0',
                 timestamp: new Date().toISOString(),
@@ -1991,6 +2331,13 @@ class NextGenUdaanApp {
     }
 
     restoreBackup() {
+        // Permission check
+        const perms = this.getModulePermissions('data_management');
+        if (!perms.edit) { // Restore is a massive edit
+            this.showError('Permission Denied: You do not have permission to restore backups.');
+            return;
+        }
+
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json';
@@ -2058,6 +2405,13 @@ class NextGenUdaanApp {
     }
 
     async clearAllData() {
+        // Permission check
+        const perms = this.getModulePermissions('data_management');
+        if (!perms.delete) {
+            this.showError('Permission Denied: You do not have permission to clear system data.');
+            return;
+        }
+
         const confirmation = prompt('To confirm system reset, type "DELETE EVERYTHING" exactly:');
         if (confirmation === 'DELETE EVERYTHING') {
             this.showLoading();
@@ -2385,6 +2739,11 @@ class NextGenUdaanApp {
         templates.forEach(t => {
             const card = document.createElement('div');
             card.className = 'template-card';
+            // detailed permissions
+            const waPerms = this.getModulePermissions('whatsapp_templates');
+            const canEdit = waPerms.edit;
+            const canDelete = waPerms.delete;
+
             card.innerHTML = `
                 <div class="template-card-header">
                     <h4>${t.name}</h4>
@@ -2395,12 +2754,14 @@ class NextGenUdaanApp {
                     <button class="btn btn--primary btn--sm btn--full-width" onclick="app.startMessaging('${t.id}')">
                         <i data-feather="send"></i> Use
                     </button>
+                    ${canEdit ? `
                     <button class="btn btn--secondary btn--sm" onclick="app.editTemplate('${t.id}')">
                         <i data-feather="edit"></i>
-                    </button>
+                    </button>` : ''}
+                    ${canDelete ? `
                     <button class="btn btn--error btn--sm" onclick="app.deleteTemplate('${t.id}')">
                         <i data-feather="trash-2"></i>
-                    </button>
+                    </button>` : ''}
                 </div>
             `;
             grid.appendChild(card);
@@ -2659,6 +3020,176 @@ class NextGenUdaanApp {
         }
     }
 
+    async loadTeams() {
+        this.renderTeams();
+        this.setupTeamsListeners();
+    }
+
+    renderTeams() {
+        const grid = document.getElementById('teams-grid');
+        if (!grid) return;
+
+        if (this.data.teams.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state">
+                    <i data-feather="users"></i>
+                    <h3>No Teams Found</h3>
+                    <p>Create your first team to start organizing members.</p>
+                </div>
+            `;
+            if (typeof feather !== 'undefined') feather.replace();
+            return;
+        }
+
+        grid.innerHTML = '';
+        this.data.teams.forEach(team => {
+            const leader = this.data.employees.find(e => e.id === team.leaderId);
+            const memberCount = team.members ? team.members.length : 0;
+            
+            const card = document.createElement('div');
+            card.className = 'team-card';
+            card.innerHTML = `
+                <div class="team-card-header">
+                    <div class="team-info">
+                        <h3>${team.name}</h3>
+                        <span class="leader-badge">Leader: ${leader ? leader.fullName : 'Unassigned'}</span>
+                    </div>
+                    <div class="team-actions">
+                        <button class="btn-icon-only edit-team" data-id="${team.id}" title="Edit Team">
+                            <i data-feather="edit"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="team-stats">
+                    <div class="stat">
+                        <span class="value">${memberCount}</span>
+                        <span class="label">Members</span>
+                    </div>
+                </div>
+                <div class="team-members-preview">
+                    ${this.renderTeamMembersPreview(team.members)}
+                </div>
+            `;
+            grid.appendChild(card);
+        });
+
+        if (typeof feather !== 'undefined') feather.replace();
+    }
+
+    renderTeamMembersPreview(memberIds) {
+        if (!memberIds || memberIds.length === 0) return '<p class="empty-members">No members assigned</p>';
+        
+        const members = memberIds.map(id => this.data.employees.find(e => e.id === id)).filter(Boolean);
+        return members.slice(0, 5).map(m => `
+            <div class="member-mini-badge" title="${m.fullName}">
+                ${m.fullName.charAt(0)}
+            </div>
+        `).join('') + (members.length > 5 ? `<div class="member-mini-badge plus">+${members.length - 5}</div>` : '');
+    }
+
+    setupTeamsListeners() {
+        const createBtn = document.getElementById('create-team-btn');
+        const teamForm = document.getElementById('team-form');
+        const modal = document.getElementById('team-modal');
+
+        if (createBtn) {
+            createBtn.onclick = () => {
+                this.openTeamModal();
+            };
+        }
+
+        if (teamForm) {
+            teamForm.onsubmit = (e) => this.handleTeamSubmit(e);
+        }
+
+        // Delegate edit button
+        const grid = document.getElementById('teams-grid');
+        if (grid) {
+            grid.onclick = (e) => {
+                const editBtn = e.target.closest('.edit-team');
+                if (editBtn) {
+                    const id = editBtn.dataset.id;
+                    this.openTeamModal(id);
+                }
+            };
+        }
+    }
+
+    openTeamModal(teamId = null) {
+        const modal = document.getElementById('team-modal');
+        const form = document.getElementById('team-form');
+        const title = document.getElementById('team-modal-title');
+        const idInput = document.getElementById('team-id');
+        const leaderSelect = document.getElementById('team-leader');
+        const memberSelect = document.getElementById('team-members');
+
+        // Populate selects
+        leaderSelect.innerHTML = '<option value="">Select Leader</option>';
+        memberSelect.innerHTML = '';
+
+        this.data.employees.forEach(emp => {
+            const opt = document.createElement('option');
+            opt.value = emp.id;
+            opt.textContent = emp.fullName;
+            leaderSelect.appendChild(opt);
+
+            const mOpt = document.createElement('option');
+            mOpt.value = emp.id;
+            mOpt.textContent = emp.fullName;
+            memberSelect.appendChild(mOpt);
+        });
+
+        if (teamId) {
+            const team = this.data.teams.find(t => t.id === teamId);
+            title.textContent = 'Edit Team';
+            idInput.value = teamId;
+            form.elements['team-name'].value = team.name;
+            form.elements['team-leader'].value = team.leaderId;
+            
+            // Set multi-select values
+            Array.from(memberSelect.options).forEach(opt => {
+                opt.selected = team.members ? team.members.includes(opt.value) : false;
+            });
+        } else {
+            title.textContent = 'Create New Team';
+            form.reset();
+            idInput.value = '';
+        }
+
+        modal.classList.add('active');
+    }
+
+    async handleTeamSubmit(e) {
+        e.preventDefault();
+        const form = e.target;
+        const id = form.elements['team-id'].value;
+        const name = form.elements['team-name'].value;
+        const leaderId = form.elements['team-leader'].value;
+        const members = Array.from(form.elements['team-members'].selectedOptions).map(opt => opt.value);
+
+        const teamData = {
+            name,
+            leaderId,
+            members,
+            updatedAt: new Date().toISOString()
+        };
+
+        try {
+            if (id) {
+                await this.db.collection('teams').doc(id).update(teamData);
+                this.showSuccess('Team updated successfully!');
+            } else {
+                teamData.createdAt = new Date().toISOString();
+                await this.db.collection('teams').add(teamData);
+                this.showSuccess('Team created successfully!');
+            }
+            document.getElementById('team-modal').classList.remove('active');
+        } catch (err) {
+            console.error('Error saving team:', err);
+            this.showError('Failed to save team');
+        }
+    }
+
     async logActivity(action, details) {
         try {
             await this.db.collection('activities').add({
@@ -2671,6 +3202,7 @@ class NextGenUdaanApp {
             console.error('Error logging activity:', err);
         }
     }
+    // NOTE: setupRoleBasedAccess is defined earlier in the file (around line 429)
 }
 
 // Global initialization with multiple fallbacks
