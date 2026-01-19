@@ -1032,6 +1032,11 @@ class NextGenUdaanApp {
     }
 
     loadProspects() {
+        // Show team column header for admin users
+        const teamHeader = document.getElementById('team-column-header');
+        if (teamHeader) {
+            teamHeader.style.display = this.isAdmin() ? 'table-cell' : 'none';
+        }
         this.renderProspectsTable();
     }
 
@@ -1039,15 +1044,17 @@ class NextGenUdaanApp {
         const tbody = document.getElementById('prospects-tbody');
         if (!tbody) return;
 
-        const prospects = prospectsToRender || this.data.prospects;
+        // Use access-filtered prospects if no specific list provided
+        const accessibleProspects = prospectsToRender || this.getAccessibleProspects();
         tbody.innerHTML = '';
 
-        if (prospects.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="8">${this.getEmptyState('No prospects found matching your search.')}</td></tr>`;
+        if (accessibleProspects.length === 0) {
+            const colspan = this.isAdmin() ? '9' : '8';
+            tbody.innerHTML = `<tr><td colspan="${colspan}">${this.getEmptyState('No prospects found matching your search.')}</td></tr>`;
             return;
         }
 
-        prospects.forEach(prospect => {
+        accessibleProspects.forEach(prospect => {
             const row = document.createElement('tr');
 
             // Create status dropdown
@@ -1055,10 +1062,19 @@ class NextGenUdaanApp {
                 .map(s => `<option value="${s}" ${prospect.status === s ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`)
                 .join('');
 
-            // detailed permissions
+            // Check permissions and access
             const prospectPerms = this.getModulePermissions('prospect_management');
-            const canEdit = prospectPerms.edit;
-            const canDelete = prospectPerms.delete;
+            const canAccessProspect = this.canEditProspect(prospect);
+            const canEdit = prospectPerms.edit && canAccessProspect;
+            const canDelete = prospectPerms.delete && canAccessProspect;
+            const isAdminUser = this.isAdmin();
+
+            // Build team column for admin
+            const teamColumn = isAdminUser ? `
+                <td>
+                    <span class="badge badge--team">${this.getTeamName(prospect.teamId)}</span>
+                </td>
+            ` : '';
 
             row.innerHTML = `
                 <td>${prospect.name}</td>
@@ -1074,6 +1090,7 @@ class NextGenUdaanApp {
                 </td>
                 <td>${prospect.leadSource}</td>
                 <td>${this.getAssignedName(prospect.assignedTo)}</td>
+                ${teamColumn}
                 <td>${this.formatDate(prospect.followUpDate)}</td>
                 <td>
                     <div class="action-buttons">
@@ -1087,6 +1104,10 @@ class NextGenUdaanApp {
                         ${canDelete ? `
                         <button class="btn-icon" onclick="app.deleteProspect('${prospect.id}')" title="Delete">
                             <i data-feather="trash-2"></i>
+                        </button>` : ''}
+                        ${isAdminUser ? `
+                        <button class="btn-icon" onclick="app.showAssignToTeamModal('${prospect.id}')" title="Assign to Team">
+                            <i data-feather="users"></i>
                         </button>` : ''}
                     </div>
                 </td>
@@ -1126,7 +1147,8 @@ class NextGenUdaanApp {
 
     filterProspects(searchTerm) {
         const term = searchTerm.toLowerCase().trim();
-        const filtered = this.data.prospects.filter(p =>
+        const accessibleProspects = this.getAccessibleProspects();
+        const filtered = accessibleProspects.filter(p =>
             p.name.toLowerCase().includes(term) ||
             p.phone.includes(term) ||
             (p.email && p.email.toLowerCase().includes(term))
@@ -1135,9 +1157,10 @@ class NextGenUdaanApp {
     }
 
     filterProspectsByStatus(status) {
+        const accessibleProspects = this.getAccessibleProspects();
         const filtered = (!status || status === 'all')
-            ? this.data.prospects
-            : this.data.prospects.filter(p => p.status === status);
+            ? accessibleProspects
+            : accessibleProspects.filter(p => p.status === status);
         this.renderProspectsTable(filtered);
     }
 
@@ -1688,6 +1711,121 @@ class NextGenUdaanApp {
         return 'Unknown';
     }
 
+    // Access Control Helper - Get current user's designation
+    getUserDesignation() {
+        if (!this.currentUser || !this.currentUser.employeeId) return null;
+        
+        const employee = this.data.employees.find(e => e.id === this.currentUser.employeeId);
+        return employee?.designation || null;
+    }
+
+    // Access Control Helper - Get current user's team
+    getUserTeam() {
+        if (!this.currentUser || !this.currentUser.employeeId) return null;
+        
+        const employee = this.data.employees.find(e => e.id === this.currentUser.employeeId);
+        return employee?.teamId || null;
+    }
+
+    // Access Control Helper - Check if user is admin
+    isAdmin() {
+        const designation = this.getUserDesignation();
+        return designation === 'admin' || this.currentUser?.role === 'Admin';
+    }
+
+    // Access Control Helper - Check if user is team leader
+    isTeamLeader() {
+        const designation = this.getUserDesignation();
+        return designation === 'team_leader';
+    }
+
+    // Access Control Helper - Determine prospect access level
+    getProspectAccessLevel(prospect) {
+        const user = this.currentUser;
+        if (!user) return 'none';
+
+        // Admin has full access to all prospects
+        if (this.isAdmin()) return 'full';
+
+        const userTeamId = this.getUserTeam();
+        const prospectTeamId = prospect.teamId;
+
+        // Team leader access
+        if (this.isTeamLeader()) {
+            // Can access prospects assigned to their team
+            if (prospectTeamId && prospectTeamId === userTeamId) return 'team';
+            // Can access prospects they own/created
+            if (prospect.ownerId === user.employeeId || prospect.createdBy === user.employeeId) return 'own';
+            return 'none';
+        }
+
+        // Team member access - only own prospects
+        if (prospect.assignedTo === user.employeeId || 
+            prospect.ownerId === user.employeeId || 
+            prospect.createdBy === user.employeeId) {
+            return 'own';
+        }
+
+        return 'none';
+    }
+
+    // Access Control Helper - Check if user can edit prospect
+    canEditProspect(prospect) {
+        const access = this.getProspectAccessLevel(prospect);
+        return access !== 'none';
+    }
+
+    // Access Control Helper - Check if user can reassign prospect
+    canReassignProspect(prospect, targetUserId) {
+        const access = this.getProspectAccessLevel(prospect);
+        
+        // Admin can reassign anywhere
+        if (access === 'full') return true;
+        
+        // Team leader can only reassign within their team
+        if (access === 'team') {
+            const userTeamId = this.getUserTeam();
+            const targetUser = this.data.employees.find(e => e.id === targetUserId);
+            return targetUser && targetUser.teamId === userTeamId;
+        }
+        
+        // Team members cannot reassign
+        return false;
+    }
+
+    // Filter prospects based on user's access level
+    getAccessibleProspects() {
+        if (this.isAdmin()) {
+            // Admin sees all prospects
+            return this.data.prospects;
+        }
+
+        const userTeamId = this.getUserTeam();
+        const userId = this.currentUser?.employeeId;
+
+        if (this.isTeamLeader()) {
+            // Team leader sees team prospects
+            return this.data.prospects.filter(p => {
+                const accessLevel = this.getProspectAccessLevel(p);
+                return accessLevel === 'team' || accessLevel === 'own';
+            });
+        }
+
+        // Team members see only their own prospects
+        return this.data.prospects.filter(p => {
+            return p.assignedTo === userId || 
+                   p.ownerId === userId || 
+                   p.createdBy === userId;
+        });
+    }
+
+    // Get team name by ID
+    getTeamName(teamId) {
+        if (!teamId) return 'No Team';
+        const team = this.data.teams.find(t => t.id === teamId);
+        return team?.name || 'Unknown Team';
+    }
+
     getNormalizedLeadSource(source) {
         if (!source) return 'Other';
         const s = source.toLowerCase();
@@ -1938,6 +2076,10 @@ class NextGenUdaanApp {
 
         try {
             const formData = new FormData(e.target);
+            
+            // Determine team and ownership based on user role
+            const userTeamId = this.getUserTeam();
+            const userId = this.currentUser?.employeeId;
 
             const newProspect = {
                 name: formData.get('name'),
@@ -1950,8 +2092,12 @@ class NextGenUdaanApp {
                 leadSource: formData.get('leadSource'),
                 location: formData.get('location'),
                 followUpDate: formData.get('followUpDate'),
-                assignedTo: formData.get('assignedTo'),
+                assignedTo: formData.get('assignedTo') || (this.isAdmin() ? '' : userId),
                 status: 'new',
+                // Team ownership fields
+                teamId: this.isAdmin() ? '' : userTeamId, // Team leaders/members auto-assign to their team
+                ownerId: userId, // Track who created this prospect
+                createdBy: userId, // Track original creator
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 notes: formData.get('notes')
@@ -1978,7 +2124,7 @@ class NextGenUdaanApp {
 
         } catch (error) {
             console.error('Error adding prospect:', error);
-            this.showError('Error adding prospect. Please try again.');
+            this.showError('Error adding prospect. Please  try again.');
         }
     }
 
@@ -3156,7 +3302,8 @@ class NextGenUdaanApp {
             idInput.value = '';
         }
 
-        modal.classList.add('active');
+        modal.classList.remove('hidden');
+        this.initializeFeatherIcons();
     }
 
     async handleTeamSubmit(e) {
@@ -3183,10 +3330,170 @@ class NextGenUdaanApp {
                 await this.db.collection('teams').add(teamData);
                 this.showSuccess('Team created successfully!');
             }
-            document.getElementById('team-modal').classList.remove('active');
+            document.getElementById('team-modal').classList.add('hidden');
         } catch (err) {
             console.error('Error saving team:', err);
             this.showError('Failed to save team');
+        }
+    }
+
+    // Team Prospect Assignment Functions
+    showAssignToTeamModal(prospectId) {
+        if (!this.isAdmin()) {
+            this.showError('Only administrators can reassign prospects to teams');
+            return;
+        }
+
+        const modal = document.getElementById('assign-to-team-modal');
+        const prospectIdInput = document.getElementById('assign-prospect-id');
+        const teamSelect = document.getElementById('assign-team-select');
+        const memberSelect = document.getElementById('assign-member-select');
+
+        if (!modal || !prospectIdInput || !teamSelect) return;
+
+        // Set prospect ID
+        prospectIdInput.value = prospectId;
+
+        // Populate teams
+        teamSelect.innerHTML = '<option value="">Choose a team...</option>';
+        this.data.teams.forEach(team => {
+            const option = document.createElement('option');
+            option.value = team.id;
+            option.textContent = team.name;
+            teamSelect.appendChild(option);
+        });
+
+        // Setup team change listener to populate members
+        teamSelect.onchange = () => {
+            this.populateTeamMembers(teamSelect.value, memberSelect);
+        };
+
+        // Setup form submit
+        const form = document.getElementById('assign-to-team-form');
+        if (form) {
+            form.onsubmit = (e) => this.handleAssignToTeam(e);
+        }
+
+        modal.classList.remove('hidden');
+        modal.classList.add('active');
+        this.initializeFeatherIcons();
+    }
+
+    populateTeamMembers(teamId, memberSelect) {
+        if (!teamId || !memberSelect) {
+            memberSelect.innerHTML = '<option value="">Choose a team first...</option>';
+            return;
+        }
+
+        const team = this.data.teams.find(t => t.id === teamId);
+        if (!team) return;
+
+        memberSelect.innerHTML = '<option value="">Leave unassigned (Team Leader will assign)</option>';
+        
+        // Add team leader
+        if (team.leaderId) {
+            const leader = this.data.employees.find(e => e.id === team.leaderId);
+            if (leader) {
+                const option = document.createElement('option');
+                option.value = leader.id;
+                option.textContent = `${leader.fullName || leader.name} (Team Leader)`;
+                memberSelect.appendChild(option);
+            }
+        }
+
+        // Add team members
+        if (team.members && team.members.length > 0) {
+            team.members.forEach(memberId => {
+                const member = this.data.employees.find(e => e.id === memberId);
+                if (member) {
+                    const option = document.createElement('option');
+                    option.value = member.id;
+                    option.textContent = member.fullName || member.name;
+                    memberSelect.appendChild(option);
+                }
+            });
+        }
+    }
+
+    async handleAssignToTeam(e) {
+        e.preventDefault();
+        
+        const prospectId = document.getElementById('assign-prospect-id').value;
+        const teamId = document.getElementById('assign-team-select').value;
+        const memberId = document.getElementById('assign-member-select').value;
+
+        if (!prospectId || !teamId) {
+            this.showError('Please select a team');
+            return;
+        }
+
+        try {
+            this.showLoading();
+            
+            const updateData = {
+                teamId: teamId,
+                updatedAt: new Date().toISOString()
+            };
+
+            // If member selected, assign to them
+            if (memberId) {
+                updateData.assignedTo = memberId;
+            }
+
+            await this.db.collection('prospects').doc(prospectId).update(updateData);
+            
+            // Log activity
+            const prospect = this.data.prospects.find(p => p.id === prospectId);
+            const team = this.data.teams.find(t => t.id === teamId);
+            await this.logActivity(
+                'Prospect Assigned to Team',
+                `Assigned ${prospect?.name} to team ${team?.name}`
+            );
+
+            this.hideLoading();
+            this.showSuccess('Prospect assigned to team successfully!');
+            this.closeModal();
+            this.renderProspectsTable();
+        } catch (error) {
+            console.error('Error assigning prospect to team:', error);
+            this.hideLoading();
+            this.showError('Failed to assign prospect to team');
+        }
+    }
+
+    // Bulk reassign prospects from one team to another
+    async reassignProspectsToTeam(prospectIds, targetTeamId) {
+        if (!this.isAdmin()) {
+            this.showError('Only administrators can reassign prospects between teams');
+            return;
+        }
+
+        try {
+            this.showLoading();
+            
+            const updatePromises = prospectIds.map(prospectId => 
+                this.db.collection('prospects').doc(prospectId).update({
+                    teamId: targetTeamId,
+                    assignedTo: '', // Clear individual assignment when changing teams
+                    updatedAt: new Date().toISOString()
+                })
+            );
+
+            await Promise.all(updatePromises);
+            
+            const team = this.data.teams.find(t => t.id === targetTeamId);
+            await this.logActivity(
+                'Bulk Team Reassignment',
+                `Reassigned ${prospectIds.length} prospects to team ${team?.name}`
+            );
+
+            this.hideLoading();
+            this.showSuccess(`${prospectIds.length} prospects reassigned successfully!`);
+            this.renderProspectsTable();
+        } catch (error) {
+            console.error('Error reassigning prospects:', error);
+            this.hideLoading();
+            this.showError('Failed to reassign prospects');
         }
     }
 

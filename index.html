@@ -273,6 +273,7 @@
                                     <th>Status</th>
                                     <th>Lead Source</th>
                                     <th>Assigned To</th>
+                                    <th id="team-column-header" style="display: none;">Team</th>
                                     <th>Follow-up Date</th>
                                     <th>Actions</th>
                                 </tr>
@@ -1032,8 +1033,43 @@
         firebase.initializeApp(firebaseConfig);
     </script>
 
+    <!-- Assign to Team Modal (Admin Only) -->
+    <div id="assign-to-team-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Assign Prospect to Team</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="assign-to-team-form" class="premium-form">
+                    <input type="hidden" id="assign-prospect-id">
+                    <div class="form-group">
+                        <label class="form-label">Select Team *</label>
+                        <select id="assign-team-select" class="form-control" required>
+                            <option value="">Choose a team...</option>
+                            <!-- Teams populated by JS -->
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Optionally Assign to Member</label>
+                        <select id="assign-member-select" class="form-control">
+                            <option value="">Leave unassigned (Team Leader will assign)</option>
+                            <!-- Members populated based on team selection -->
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn--secondary modal-close">Cancel</button>
+                        <button type="submit" class="btn btn--primary">
+                            <i data-feather="check"></i> Assign to Team
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- Team Modal -->
-    <div id="team-modal" class="modal">
+    <div id="team-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="team-modal-title">Create New Team</h3>
